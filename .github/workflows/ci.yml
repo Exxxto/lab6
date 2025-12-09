@@ -1,154 +1,280 @@
-# GitLab CI/CD Pipeline Configuration
+# GitHub Actions CI/CD Pipeline Configuration
 # Этот файл определяет автоматизированный процесс сборки, тестирования и проверки кода
 
-# Определение этапов пайплайна (выполняются последовательно)
-stages:
-  - build      # Этап сборки и подготовки окружения
-  - test       # Этап тестирования (выполняется параллельно с linting)
-  - linting    # Этап проверки качества кода (выполняется параллельно с test)
-  - security   # Этап проверки безопасности зависимостей
+name: CI/CD Pipeline
 
-# Глобальные переменные окружения для всех jobs
-variables:
-  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"  # Кэш для pip
-  PYLINT_THRESHOLD: "8.0"                       # Минимальный порог качества кода для pylint
-  PYTHON_VERSION: "3.11"                        # Версия Python
+# Триггеры запуска workflow
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # Позволяет запускать вручную
 
-# Кэширование зависимостей для ускорения выполнения пайплайна
-cache:
-  paths:
-    - .cache/pip
-    - venv/
+# Переменные окружения для всех jobs
+env:
+  PYTHON_VERSION: '3.11'
+  PYLINT_THRESHOLD: '8.0'
 
-# ЭТАП BUILD
-build:
-  stage: build
-  image: python:${PYTHON_VERSION}-slim  # Используем Docker образ с Python
-  script:
-    - echo "=== Начало этапа сборки ==="
-    - python --version
-    - pip --version
+# Jobs выполняются параллельно, если не указаны зависимости
+jobs:
+  # ============================================
+  # JOB BUILD: Сборка проекта и установка зависимостей
+  # ============================================
+  build:
+    name: Build and Setup
+    runs-on: ubuntu-latest
     
-    # Создание виртуального окружения
-    - python -m venv venv
-    - source venv/bin/activate
-    
-    # Обновление pip и установка зависимостей
-    - pip install --upgrade pip
-    - pip install -r requirements.txt
-    
-    # Проверка синтаксиса Python файлов
-    - python -m py_compile calculator.py
-    - python -m py_compile test_calculator.py
-    
-    - echo "=== Сборка завершена успешно ==="
-  artifacts:
-    paths:
-      - venv/  # Сохраняем виртуальное окружение для следующих этапов
-    expire_in: 1 hour
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'  # Кэширование pip зависимостей
+      
+      - name: Display Python version
+        run: |
+          echo "=== Начало этапа сборки ==="
+          python --version
+          pip --version
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Check Python syntax
+        run: |
+          python -m py_compile calculator.py
+          python -m py_compile test_calculator.py
+          echo "=== Сборка завершена успешно ==="
+      
+      # Кэшируем установленные зависимости для других jobs
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
-# ЭТАП TEST: Запуск unit-тестов
-test:
-  stage: test
-  image: python:${PYTHON_VERSION}-slim
-  dependencies:
-    - build  # Зависит от этапа build
-  script:
-    - echo "=== Начало этапа тестирования ==="
-    - source venv/bin/activate
+  # ============================================
+  # JOB TEST: Запуск unit-тестов
+  # ============================================
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    needs: build  # Зависит от успешного выполнения build
     
-    # Запуск тестов с покрытием кода
-    - pytest test_calculator.py -v --cov=calculator --cov-report=html --cov-report=term
-    
-    # Запуск тестов с использованием unittest (альтернативный способ)
-    - python -m unittest test_calculator.py -v
-    
-    - echo "=== Тестирование завершено успешно ==="
-  artifacts:
-    when: always  # Сохраняем артефакты даже при ошибках
-    paths:
-      - htmlcov/  # HTML отчет о покрытии кода
-    reports:
-      coverage_report:
-        coverage_format: cobertura
-        path: coverage.xml
-    expire_in: 1 week
-  coverage: '/TOTAL.*\s+(\d+%)$/'  # Регулярное выражение для извлечения процента покрытия
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Run tests with pytest
+        run: |
+          echo "=== Начало этапа тестирования ==="
+          pytest test_calculator.py -v --cov=calculator --cov-report=html --cov-report=xml --cov-report=term
+      
+      - name: Run tests with unittest
+        run: |
+          python -m unittest test_calculator.py -v
+          echo "=== Тестирование завершено успешно ==="
+      
+      # Загрузка отчета о покрытии в Codecov (опционально)
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+      
+      # Сохранение HTML отчета о покрытии как артефакт
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: htmlcov/
+          retention-days: 7
+      
+      # Добавление комментария с покрытием в PR (опционально)
+      - name: Coverage comment
+        if: github.event_name == 'pull_request'
+        run: |
+          COVERAGE=$(grep -oP 'TOTAL.*\s+\K\d+' coverage.xml || echo "N/A")
+          echo "Code coverage: $COVERAGE%"
 
-# ЭТАП LINTING: Проверка качества кода
-linting:
-  stage: linting  # Выполняется параллельно с test
-  image: python:${PYTHON_VERSION}-slim
-  dependencies:
-    - build
-  script:
-    - echo "=== Начало этапа линтинга ==="
-    - source venv/bin/activate
+  # ============================================
+  # JOB LINTING: Проверка качества кода
+  # ============================================
+  linting:
+    name: Code Quality Check
+    runs-on: ubuntu-latest
+    needs: build  # Зависит от успешного выполнения build
     
-    # Запуск pylint для проверки качества кода
-    - pylint calculator.py test_calculator.py --output-format=text | tee pylint-report.txt
-    
-    # Проверка порога качества кода
-    - SCORE=$(pylint calculator.py test_calculator.py --output-format=text | grep "Your code has been rated" | awk '{print $7}' | cut -d'/' -f1)
-    - echo "Оценка качества кода pylint = $SCORE"
-    - echo "Минимальный порог = $PYLINT_THRESHOLD"
-    
-    - echo "=== Линтинг завершен успешно ==="
-  artifacts:
-    when: always
-    paths:
-      - pylint-report.txt  # Отчет pylint
-    expire_in: 1 week
-  allow_failure: true  # Не блокируем пайплайн при предупреждениях линтера
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Run pylint
+        run: |
+          echo "=== Начало этапа линтинга ==="
+          pylint calculator.py test_calculator.py --output-format=text | tee pylint-report.txt
+        continue-on-error: true  # Не блокируем workflow при предупреждениях
+      
+      - name: Check pylint score
+        run: |
+          SCORE=$(pylint calculator.py test_calculator.py --output-format=text | grep "Your code has been rated" | awk '{print $7}' | cut -d'/' -f1 || echo "0")
+          echo "Оценка качества кода pylint = $SCORE"
+          echo "Минимальный порог = $PYLINT_THRESHOLD"
+          echo "=== Линтинг завершен успешно ==="
+        continue-on-error: true
+      
+      # Сохранение отчета pylint как артефакт
+      - name: Upload pylint report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pylint-report
+          path: pylint-report.txt
+          retention-days: 7
 
-# ЭТАП SECURITY: Проверка безопасности зависимостей
-security:
-  stage: security
-  image: python:${PYTHON_VERSION}-slim
-  dependencies:
-    - build
-  script:
-    - echo "=== Начало этапа проверки безопасности ==="
-    - source venv/bin/activate
+  # ============================================
+  # JOB SECURITY: Проверка безопасности зависимостей
+  # ============================================
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: [test, linting]  # Выполняется после test и linting
     
-    # Проверка зависимостей на известные уязвимости с помощью safety
-    - safety check --json --output security-report.json || true
-    - safety check --output security-report.txt || true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Run safety check
+        run: |
+          echo "=== Начало этапа проверки безопасности ==="
+          safety check --json --output security-report.json || true
+          safety check --output security-report.txt || true
+          echo "=== Проверка безопасности завершена ==="
+        continue-on-error: true
+      
+      # Сохранение отчетов о безопасности как артефакты
+      - name: Upload security reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-reports
+          path: |
+            security-report.json
+            security-report.txt
+          retention-days: 7
+      
+      # Дополнительная проверка с pip-audit (альтернатива safety)
+      - name: Run pip-audit
+        run: |
+          pip install pip-audit
+          pip-audit --desc || true
+        continue-on-error: true
+
+  # ============================================
+  # JOB NOTIFY: Уведомления (опционально)
+  # ============================================
+  notify:
+    name: Send Notifications
+    runs-on: ubuntu-latest
+    needs: [test, linting, security]
+    if: failure()  # Выполняется только при ошибке
     
-    - echo "=== Проверка безопасности завершена ==="
-  artifacts:
-    when: always
-    paths:
-      - security-report.json  # JSON отчет о уязвимостях
-      - security-report.txt   # Текстовый отчет о уязвимостях
-    expire_in: 1 week
-  allow_failure: true  # Не блокируем пайплайн при обнаружении уязвимостей
+    steps:
+      - name: Send Slack notification
+        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+          --data "{
+            \"text\": \"❌ GitHub Actions Pipeline Failed!\",
+            \"attachments\": [{
+              \"color\": \"danger\",
+              \"fields\": [
+                {\"title\": \"Repository\", \"value\": \"${{ github.repository }}\", \"short\": true},
+                {\"title\": \"Branch\", \"value\": \"${{ github.ref_name }}\", \"short\": true},
+                {\"title\": \"Commit\", \"value\": \"${{ github.sha }}\", \"short\": true},
+                {\"title\": \"Author\", \"value\": \"${{ github.actor }}\", \"short\": true},
+                {\"title\": \"Workflow\", \"value\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\", \"short\": false}
+              ]
+            }]
+          }" \
+          ${{ secrets.SLACK_WEBHOOK_URL }}
+        continue-on-error: true
+      
+      - name: Comment on PR (if applicable)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '❌ Pipeline failed! Please check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.'
+            })
+        continue-on-error: true
 
-# ДОПОЛНИТЕЛЬНО: Уведомления в Slack (опционально)
-# Для настройки уведомлений в Slack:
-# 1. Создайте Incoming Webhook в Slack
-# 2. Добавьте переменную SLACK_WEBHOOK_URL в Settings > CI/CD > Variables
-# 3. Раскомментируйте секцию ниже
-
-# notify_failure:
-#   stage: .post  # Специальный этап, выполняется после всех остальных
-#   image: curlimages/curl:latest
-#   script:
-#     - |
-#       curl -X POST -H 'Content-type: application/json' \
-#       --data "{
-#         \"text\": \"❌ Pipeline Failed!\",
-#         \"attachments\": [{
-#           \"color\": \"danger\",
-#           \"fields\": [
-#             {\"title\": \"Project\", \"value\": \"$CI_PROJECT_NAME\", \"short\": true},
-#             {\"title\": \"Branch\", \"value\": \"$CI_COMMIT_REF_NAME\", \"short\": true},
-#             {\"title\": \"Commit\", \"value\": \"$CI_COMMIT_SHORT_SHA\", \"short\": true},
-#             {\"title\": \"Author\", \"value\": \"$GITLAB_USER_NAME\", \"short\": true},
-#             {\"title\": \"Pipeline\", \"value\": \"$CI_PIPELINE_URL\", \"short\": false}
-#           ]
-#         }]
-#       }" \
-#       $SLACK_WEBHOOK_URL
-#   when: on_failure  # Выполняется только при ошибке
-#   allow_failure: true
+  # ============================================
+  # JOB SUMMARY: Итоговый отчет
+  # ============================================
+  summary:
+    name: Pipeline Summary
+    runs-on: ubuntu-latest
+    needs: [build, test, linting, security]
+    if: always()
+    
+    steps:
+      - name: Generate summary
+        run: |
+          echo "## 📊 Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Repository:** ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Author:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Workflow:** [View Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ✅ All checks completed!" >> $GITHUB_STEP_SUMMARY
