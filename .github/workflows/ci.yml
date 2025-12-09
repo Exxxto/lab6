@@ -1,0 +1,154 @@
+# GitLab CI/CD Pipeline Configuration
+# Этот файл определяет автоматизированный процесс сборки, тестирования и проверки кода
+
+# Определение этапов пайплайна (выполняются последовательно)
+stages:
+  - build      # Этап сборки и подготовки окружения
+  - test       # Этап тестирования (выполняется параллельно с linting)
+  - linting    # Этап проверки качества кода (выполняется параллельно с test)
+  - security   # Этап проверки безопасности зависимостей
+
+# Глобальные переменные окружения для всех jobs
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"  # Кэш для pip
+  PYLINT_THRESHOLD: "8.0"                       # Минимальный порог качества кода для pylint
+  PYTHON_VERSION: "3.11"                        # Версия Python
+
+# Кэширование зависимостей для ускорения выполнения пайплайна
+cache:
+  paths:
+    - .cache/pip
+    - venv/
+
+# ЭТАП BUILD
+build:
+  stage: build
+  image: python:${PYTHON_VERSION}-slim  # Используем Docker образ с Python
+  script:
+    - echo "=== Начало этапа сборки ==="
+    - python --version
+    - pip --version
+    
+    # Создание виртуального окружения
+    - python -m venv venv
+    - source venv/bin/activate
+    
+    # Обновление pip и установка зависимостей
+    - pip install --upgrade pip
+    - pip install -r requirements.txt
+    
+    # Проверка синтаксиса Python файлов
+    - python -m py_compile calculator.py
+    - python -m py_compile test_calculator.py
+    
+    - echo "=== Сборка завершена успешно ==="
+  artifacts:
+    paths:
+      - venv/  # Сохраняем виртуальное окружение для следующих этапов
+    expire_in: 1 hour
+
+# ЭТАП TEST: Запуск unit-тестов
+test:
+  stage: test
+  image: python:${PYTHON_VERSION}-slim
+  dependencies:
+    - build  # Зависит от этапа build
+  script:
+    - echo "=== Начало этапа тестирования ==="
+    - source venv/bin/activate
+    
+    # Запуск тестов с покрытием кода
+    - pytest test_calculator.py -v --cov=calculator --cov-report=html --cov-report=term
+    
+    # Запуск тестов с использованием unittest (альтернативный способ)
+    - python -m unittest test_calculator.py -v
+    
+    - echo "=== Тестирование завершено успешно ==="
+  artifacts:
+    when: always  # Сохраняем артефакты даже при ошибках
+    paths:
+      - htmlcov/  # HTML отчет о покрытии кода
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+    expire_in: 1 week
+  coverage: '/TOTAL.*\s+(\d+%)$/'  # Регулярное выражение для извлечения процента покрытия
+
+# ЭТАП LINTING: Проверка качества кода
+linting:
+  stage: linting  # Выполняется параллельно с test
+  image: python:${PYTHON_VERSION}-slim
+  dependencies:
+    - build
+  script:
+    - echo "=== Начало этапа линтинга ==="
+    - source venv/bin/activate
+    
+    # Запуск pylint для проверки качества кода
+    - pylint calculator.py test_calculator.py --output-format=text | tee pylint-report.txt
+    
+    # Проверка порога качества кода
+    - SCORE=$(pylint calculator.py test_calculator.py --output-format=text | grep "Your code has been rated" | awk '{print $7}' | cut -d'/' -f1)
+    - echo "Оценка качества кода pylint = $SCORE"
+    - echo "Минимальный порог = $PYLINT_THRESHOLD"
+    
+    - echo "=== Линтинг завершен успешно ==="
+  artifacts:
+    when: always
+    paths:
+      - pylint-report.txt  # Отчет pylint
+    expire_in: 1 week
+  allow_failure: true  # Не блокируем пайплайн при предупреждениях линтера
+
+# ЭТАП SECURITY: Проверка безопасности зависимостей
+security:
+  stage: security
+  image: python:${PYTHON_VERSION}-slim
+  dependencies:
+    - build
+  script:
+    - echo "=== Начало этапа проверки безопасности ==="
+    - source venv/bin/activate
+    
+    # Проверка зависимостей на известные уязвимости с помощью safety
+    - safety check --json --output security-report.json || true
+    - safety check --output security-report.txt || true
+    
+    - echo "=== Проверка безопасности завершена ==="
+  artifacts:
+    when: always
+    paths:
+      - security-report.json  # JSON отчет о уязвимостях
+      - security-report.txt   # Текстовый отчет о уязвимостях
+    expire_in: 1 week
+  allow_failure: true  # Не блокируем пайплайн при обнаружении уязвимостей
+
+# ДОПОЛНИТЕЛЬНО: Уведомления в Slack (опционально)
+# Для настройки уведомлений в Slack:
+# 1. Создайте Incoming Webhook в Slack
+# 2. Добавьте переменную SLACK_WEBHOOK_URL в Settings > CI/CD > Variables
+# 3. Раскомментируйте секцию ниже
+
+# notify_failure:
+#   stage: .post  # Специальный этап, выполняется после всех остальных
+#   image: curlimages/curl:latest
+#   script:
+#     - |
+#       curl -X POST -H 'Content-type: application/json' \
+#       --data "{
+#         \"text\": \"❌ Pipeline Failed!\",
+#         \"attachments\": [{
+#           \"color\": \"danger\",
+#           \"fields\": [
+#             {\"title\": \"Project\", \"value\": \"$CI_PROJECT_NAME\", \"short\": true},
+#             {\"title\": \"Branch\", \"value\": \"$CI_COMMIT_REF_NAME\", \"short\": true},
+#             {\"title\": \"Commit\", \"value\": \"$CI_COMMIT_SHORT_SHA\", \"short\": true},
+#             {\"title\": \"Author\", \"value\": \"$GITLAB_USER_NAME\", \"short\": true},
+#             {\"title\": \"Pipeline\", \"value\": \"$CI_PIPELINE_URL\", \"short\": false}
+#           ]
+#         }]
+#       }" \
+#       $SLACK_WEBHOOK_URL
+#   when: on_failure  # Выполняется только при ошибке
+#   allow_failure: true
